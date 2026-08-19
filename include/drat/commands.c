@@ -8,6 +8,7 @@ const drat_command_t commands[] = {
     // { "modify"                  , cmd_modify                    , "Modify structures on disk to resolve problems" },
     { "read"                    , cmd_read                      , "Read a block and display information about it" },
     { "recover"                 , cmd_recover                   , "Recover a file based on its filepath" },
+    { "recover-tree"            , cmd_recover_tree              , "Recursively recover every reachable file under a directory (default: volume root)" },
     { "resolver"                , cmd_resolver                  , "Check if given Virtual OIDs resolve to given Physical OIDs" },
     { "search"                  , cmd_search                    , "Search the partition for blocks with certain features/properties" },
     { "version"                 , cmd_version                   , "Display Drat's version number along with legal info (copyright, warranty, and license)" },

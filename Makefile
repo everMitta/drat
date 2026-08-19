@@ -9,7 +9,7 @@ CC := gcc
 override CFLAGS += \
 -std=c99 \
 -D _GNU_SOURCE \
--Werror \
+\
 -Wall \
 -Wextra \
 -Wno-incompatible-pointer-types \
@@ -26,8 +26,8 @@ override LDFLAGS += # Nothing
 ### On macOS, include <argp.h> from Homebrew package `argp-standalone`
 ifneq ($(OS),Windows_NT)
 	ifeq ($(shell uname -s),Darwin)
-		override CFLAGS  += -I/usr/local/Cellar/argp-standalone/1.3/include/
-		override LDFLAGS += -L/usr/local/Cellar/argp-standalone/1.3/lib/ -largp
+		override CFLAGS  += -I/opt/homebrew/opt/argp-standalone/include/
+		override LDFLAGS += -L/opt/homebrew/opt/argp-standalone/lib/ -largp -liconv
 	endif
 endif
 

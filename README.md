@@ -1,5 +1,10 @@
 # Drat (formerly apfs-tools)
 
+> **This is a fork of [jivanpal/drat](https://github.com/jivanpal/drat)** that
+> adds a `recover-tree` command for automated, corruption-resilient recovery
+> of an entire APFS volume. See [`RECOVER-TREE.md`](RECOVER-TREE.md) for what
+> changed and how to use it.
+
 Drat is a tool for analysing and recovering data from [APFS (Apple File System)](https://en.wikipedia.org/wiki/Apple_File_System)
 partitions. Its creation was inspired by a [personal data loss incident](https://apple.stackexchange.com/questions/373718)
 and [Jonathan Levin's](https://twitter.com/Morpheus______) closed-source

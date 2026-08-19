@@ -3,6 +3,7 @@
 
 /drat
 /out/
+/Makefile.backup*
 
 /docs/_build/
 /docs/_ext/__pycache__/

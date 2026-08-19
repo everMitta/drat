@@ -20,6 +20,7 @@ command_function cmd_modify;
 command_function cmd_read;
 command_function cmd_recover_raw;
 command_function cmd_recover;
+command_function cmd_recover_tree;
 command_function cmd_resolver;
 command_function cmd_search_last_btree_node;
 command_function cmd_search;

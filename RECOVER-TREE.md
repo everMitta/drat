@@ -54,6 +54,25 @@ invocation at a time isn't practical.
   is the change that makes whole-volume recovery of a corrupted volume
   possible at all. Genuine out-of-memory aborts are untouched.
 
+- **Permission bits are now preserved.** Earlier versions wrote every
+  recovered file with a hardcoded `0644`, regardless of its original mode —
+  this silently strips the executable bit from every recovered binary and
+  script, which breaks anything that was an app bundle (it won't launch) or
+  a helper tool. `recover-tree` now reads the original mode from
+  `j_inode_val_t::mode` (already present on every inode) and uses it both
+  when creating files and, once a directory's children have all been
+  written, via a final `chmod()` on the directory itself.
+
+- **Fully-sparse files are now reconstructed correctly instead of being
+  marked failed.** A file can legitimately have a non-zero declared size but
+  zero `FILE_EXTENT` records — e.g. an NVRAM/EFI-vars store that was created
+  but never customized, where the entire logical size is one big hole. That
+  case is distinguishable from real corruption: `get_fs_records()` returned
+  successfully (a corrupted/unreadable region would have made it return
+  `NULL`, which is handled separately and still logged as failed). Such
+  files are now written as a correctly-sized, zero-filled (sparse) file
+  instead of being reported as unrecoverable.
+
 - **`--path`/`--fsoid` navigation fix**: APFS/HFS+ store filenames
   Unicode-normalized to a decomposed form (what macOS's `iconv` calls
   `UTF-8-MAC`), but a path typed on the command line is normally precomposed

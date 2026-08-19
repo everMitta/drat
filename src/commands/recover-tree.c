@@ -516,8 +516,12 @@ static void recover_regular_file(fs_ctx_t* ctx, oid_t oid, const char* out_dir, 
 
     const char* ml = nlink > 1 ? " [multilinked]" : "";
 
+    // Preserve the file's original permission bits from its inode; fall back
+    // to a sane default if the stored mode has no permission bits at all.
+    mode_t file_mode = (inode->mode & 07777) ? (mode_t)(inode->mode & 07777) : 0644;
+
     if (file_size == 0) {
-        int fd = open(dest, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        int fd = open(dest, O_WRONLY | O_CREAT | O_EXCL, file_mode);
         if (fd < 0) {
             printf("FAIL %s\n     reason: could not create output file: %s\n", logical_path, strerror(errno));
             msg_list_add(&stats->errors, "FAILED %s\n  reason: could not create output file: %s", logical_path, strerror(errno));
@@ -534,16 +538,40 @@ static void recover_regular_file(fs_ctx_t* ctx, oid_t oid, const char* out_dir, 
     }
 
     if (num_extents == 0) {
-        printf("FAIL %s\n     reason: file size is %"PRIu64" bytes but no FILE EXTENT records were found\n", logical_path, file_size);
-        msg_list_add(&stats->errors, "FAILED %s\n  reason: file size is %"PRIu64" bytes but no FILE EXTENT records were found (data unrecoverable)", logical_path, file_size);
-        stats->files_failed++;
+        // `fs_records` was read successfully (we didn't bail out above with
+        // "could not read filesystem records"), so this isn't a corrupted or
+        // unreadable region -- it's a legitimate, fully-sparse file (a hole
+        // spanning its entire logical size, e.g. an never-customized NVRAM
+        // store). Reconstruct it as such: a correctly-sized, all-zero file.
+        int fd = open(dest, O_WRONLY | O_CREAT | O_EXCL, file_mode);
+        if (fd < 0) {
+            printf("FAIL %s\n     reason: could not create output file: %s\n", logical_path, strerror(errno));
+            msg_list_add(&stats->errors, "FAILED %s\n  reason: could not create output file: %s", logical_path, strerror(errno));
+            stats->files_failed++;
+            free(dest);
+            free(extents);
+            free_j_rec_array(fs_records);
+            return;
+        }
+        if (ftruncate(fd, (off_t)file_size) != 0) {
+            printf("FAIL %s\n     reason: ftruncate() failed: %s\n", logical_path, strerror(errno));
+            msg_list_add(&stats->errors, "FAILED %s\n  reason: ftruncate() failed: %s", logical_path, strerror(errno));
+            stats->files_failed++;
+            close(fd);
+            unlink(dest);
+        } else {
+            close(fd);
+            printf("OK   %s (%"PRIu64" bytes, fully sparse)%s\n", logical_path, file_size, ml);
+            stats->files_recovered++;
+            stats->bytes_recovered += file_size;
+        }
         free(dest);
         free(extents);
         free_j_rec_array(fs_records);
         return;
     }
 
-    int fd = open(dest, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    int fd = open(dest, O_WRONLY | O_CREAT | O_EXCL, file_mode);
     if (fd < 0) {
         printf("FAIL %s\n     reason: could not create output file: %s\n", logical_path, strerror(errno));
         msg_list_add(&stats->errors, "FAILED %s\n  reason: could not create output file: %s", logical_path, strerror(errno));
@@ -750,6 +778,21 @@ static void process_directory(fs_ctx_t* ctx, oid_t oid, const char* out_dir, con
         }
 
         free(child_logical);
+    }
+
+    // Now that every child has been written, restore this directory's own
+    // original permission bits. This must happen last: doing it up front
+    // (at `mkdir_p()` time) risks a restrictive original mode blocking our
+    // own writes into it while we're still populating it.
+    for (j_rec_t** cur = fs_records; *cur; cur++) {
+        j_key_t* hdr = (j_key_t*)(*cur)->data;
+        if (((hdr->obj_id_and_type & OBJ_TYPE_MASK) >> OBJ_TYPE_SHIFT) == APFS_TYPE_INODE) {
+            j_inode_val_t* dir_inode = (j_inode_val_t*)((*cur)->data + (*cur)->key_len);
+            if (dir_inode->mode & 07777) {
+                chmod(out_dir, dir_inode->mode & 07777);
+            }
+            break;
+        }
     }
 
     free_j_rec_array(fs_records);

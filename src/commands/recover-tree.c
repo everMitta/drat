@@ -192,7 +192,25 @@ typedef struct {
     btree_node_phys_t*  fs_omap_btree;
     btree_node_phys_t*  fs_root_btree;
     xid_t               max_xid;
+    // When run under `sudo` (required for raw device access), files we
+    // create are owned by root by default. If SUDO_UID/SUDO_GID identify
+    // the invoking non-root user, restore_owner() chowns everything we
+    // write back to them. Set to (uid_t)-1 / (gid_t)-1 to disable (e.g.
+    // not running under sudo).
+    uid_t               target_uid;
+    gid_t               target_gid;
 } fs_ctx_t;
+
+static void restore_owner(const fs_ctx_t* ctx, const char* path, bool is_symlink) {
+    if (ctx->target_uid == (uid_t)-1) {
+        return;
+    }
+    if (is_symlink) {
+        lchown(path, ctx->target_uid, ctx->target_gid);
+    } else {
+        chown(path, ctx->target_uid, ctx->target_gid);
+    }
+}
 
 /** Path / filename helpers **/
 
@@ -223,7 +241,13 @@ static void sanitize_component(char* out, size_t outsz, const uint8_t* raw, size
     }
 }
 
-static int mkdir_p(const char* path) {
+/**
+ * Create `path` and any missing parent directories (like `mkdir -p`). If
+ * `target_uid` is not (uid_t)-1, every path component -- newly-created or
+ * pre-existing -- is chowned to `target_uid`/`target_gid`; this is how we
+ * hand root-owned output back to the user who invoked `sudo`.
+ */
+static int mkdir_p(const char* path, uid_t target_uid, gid_t target_gid) {
     char tmp[4096];
     snprintf(tmp, sizeof(tmp), "%s", path);
     size_t len = strlen(tmp);
@@ -234,13 +258,19 @@ static int mkdir_p(const char* path) {
         if (*p == '/') {
             *p = '\0';
             mkdir(tmp, 0755);
+            if (target_uid != (uid_t)-1) {
+                chown(tmp, target_uid, target_gid);
+            }
             *p = '/';
         }
     }
-    if (mkdir(tmp, 0755) == 0 || errno == EEXIST) {
-        return 0;
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+        return -1;
     }
-    return -1;
+    if (target_uid != (uid_t)-1) {
+        chown(tmp, target_uid, target_gid);
+    }
+    return 0;
 }
 
 /**
@@ -528,6 +558,7 @@ static void recover_regular_file(fs_ctx_t* ctx, oid_t oid, const char* out_dir, 
             stats->files_failed++;
         } else {
             close(fd);
+            restore_owner(ctx, dest, false);
             printf("OK   %s (0 bytes)%s\n", logical_path, ml);
             stats->files_recovered++;
         }
@@ -561,6 +592,7 @@ static void recover_regular_file(fs_ctx_t* ctx, oid_t oid, const char* out_dir, 
             unlink(dest);
         } else {
             close(fd);
+            restore_owner(ctx, dest, false);
             printf("OK   %s (%"PRIu64" bytes, fully sparse)%s\n", logical_path, file_size, ml);
             stats->files_recovered++;
             stats->bytes_recovered += file_size;
@@ -632,10 +664,12 @@ static void recover_regular_file(fs_ctx_t* ctx, oid_t oid, const char* out_dir, 
     free_j_rec_array(fs_records);
 
     if (bad_blocks == 0 && total_written >= file_size) {
+        restore_owner(ctx, dest, false);
         printf("OK   %s (%"PRIu64" bytes)%s\n", logical_path, file_size, ml);
         stats->files_recovered++;
         stats->bytes_recovered += file_size;
     } else if (total_written > 0) {
+        restore_owner(ctx, dest, false);
         printf("PART %s (%"PRIu64"/%"PRIu64" bytes; %d bad block(s))%s\n", logical_path, total_written, file_size, bad_blocks, ml);
         msg_list_add(&stats->errors, "PARTIAL %s\n  recovered %"PRIu64" of %"PRIu64" bytes; %d block read error(s)", logical_path, total_written, file_size, bad_blocks);
         stats->files_partial++;
@@ -693,6 +727,7 @@ static void recover_symlink(fs_ctx_t* ctx, oid_t oid, const char* out_dir, const
         msg_list_add(&stats->errors, "FAILED %s\n  reason: could not create symlink: %s", logical_path, dest ? strerror(errno) : "path allocation failed");
         stats->files_failed++;
     } else {
+        restore_owner(ctx, dest, true);
         printf("OK   %s -> %s (symlink)\n", logical_path, target);
         stats->files_recovered++;
     }
@@ -750,7 +785,7 @@ static void process_directory(fs_ctx_t* ctx, oid_t oid, const char* out_dir, con
                 stats->dirs_discovered++;
                 char* child_out_dir = NULL;
                 if (asprintf(&child_out_dir, "%s/%s", out_dir, name) >= 0) {
-                    if (mkdir_p(child_out_dir) != 0) {
+                    if (mkdir_p(child_out_dir, ctx->target_uid, ctx->target_gid) != 0) {
                         printf("FAIL %s\n     reason: could not create directory: %s\n", child_logical, strerror(errno));
                         msg_list_add(&stats->errors, "FAILED %s\n  reason: could not create output directory: %s", child_logical, strerror(errno));
                         stats->files_failed++;
@@ -969,7 +1004,20 @@ int cmd_recover_tree(int argc, char** argv) {
     free(fs_root_entry);
     printf("OK.\n\n");
 
-    fs_ctx_t ctx = { fs_omap_btree, fs_root_btree, (xid_t)globals.max_xid };
+    // Raw device access requires running as root (typically via `sudo`), which
+    // would otherwise leave every recovered file/directory owned by root. If
+    // invoked via `sudo`, SUDO_UID/SUDO_GID identify the actual user; restore
+    // ownership to them as we go.
+    uid_t target_uid = (uid_t)-1;
+    gid_t target_gid = (gid_t)-1;
+    const char* sudo_uid_str = getenv("SUDO_UID");
+    const char* sudo_gid_str = getenv("SUDO_GID");
+    if (sudo_uid_str && sudo_gid_str) {
+        target_uid = (uid_t)strtoul(sudo_uid_str, NULL, 10);
+        target_gid = (gid_t)strtoul(sudo_gid_str, NULL, 10);
+    }
+
+    fs_ctx_t ctx = { fs_omap_btree, fs_root_btree, (xid_t)globals.max_xid, target_uid, target_gid };
 
     // Resolve the entrypoint (default: volume root)
     oid_t start_oid = ROOT_DIR_INO_NUM;
@@ -1033,7 +1081,7 @@ int cmd_recover_tree(int argc, char** argv) {
         snprintf(start_logical, sizeof(start_logical), "/");
     }
 
-    if (mkdir_p(options.output) != 0) {
+    if (mkdir_p(options.output, target_uid, target_gid) != 0) {
         fprintf(stderr, "ABORT: Could not create output directory `%s`: %s\n", options.output, strerror(errno));
         return EX_CANTCREAT;
     }
@@ -1082,7 +1130,7 @@ int cmd_recover_tree(int argc, char** argv) {
         }
         free(dirpart);
         if (entry_out_dir != options.output) {
-            mkdir_p(entry_out_dir);
+            mkdir_p(entry_out_dir, target_uid, target_gid);
         }
     }
 
@@ -1155,6 +1203,9 @@ int cmd_recover_tree(int argc, char** argv) {
 
     if (report) fclose(report);
     if (report_path) {
+        if (target_uid != (uid_t)-1) {
+            chown(report_path, target_uid, target_gid);
+        }
         printf("\nReport written to `%s`.\n", report_path);
         free(report_path);
     }

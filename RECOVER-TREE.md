@@ -118,7 +118,9 @@ Notes:
 
 - Always use the **raw** device (`/dev/rdiskN...`, not `/dev/diskN...`) for
   performance — same convention as Drat's other commands.
-- Requires read access to the raw device, hence `sudo` on macOS.
+- Requires read access to the raw device, hence `sudo` on macOS. Recovered
+  files are automatically chowned back to the invoking user (detected via
+  `SUDO_UID`/`SUDO_GID`) rather than being left owned by root.
 - The source device is only ever opened read-only; it is never mounted,
   repaired, or written to by this command (or by Drat in general, aside
   from the disabled `modify` command).
@@ -136,3 +138,24 @@ Notes:
   directory entry's name), not alphabetical order — so progress in the
   console log won't necessarily match a top-to-bottom `Finder`-style
   listing of the source volume.
+- **Recovered macOS `.app` bundles will not run as-is if the source region
+  they lived in had any corruption**, even if the app's own main executable
+  recovered perfectly. Every file inside a signed bundle is covered by the
+  bundle's code signature (`Contents/_CodeSignature/CodeResources`); if even
+  one sealed resource is missing or unreadable, the bundle's original
+  signature can never validate again, and macOS will refuse to launch it
+  ("app is damaged"/AMFI errors). This is not something Drat can fix — the
+  data those specific resources contained is genuinely gone. Recovery
+  options at that point are outside Drat's scope, but as a pointer: you can
+  strip the broken signature and re-sign the bundle ad-hoc
+  (`codesign --force --deep --sign - MyApp.app`) to make its own executables
+  launchable again, but restricted entitlements (`com.apple.security.
+  hypervisor`, `network.server`, `app-sandbox`, etc.) generally cannot be
+  legitimately re-granted without Apple's real signing certificate — AMFI
+  will reject an ad-hoc-signed binary that claims them ("adhoc signed but
+  contains restricted entitlements"). If the app hosts *data* that's
+  actually portable (e.g. a virtual machine bundle, a document, a project
+  file) rather than being the valuable thing itself, it's usually far
+  simpler to open that recovered data with a separately, properly installed
+  copy of the same app instead of trying to resurrect the recovered copy of
+  the app itself.
